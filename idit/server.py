@@ -2,7 +2,9 @@
 Personal Idit — Chain API Server
 Allows any signer to mint, query, and verify chain entries over HTTP.
 """
+import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -44,6 +46,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         entry_type: str = "note"
         description: str = ""
         tags: list[str] = []
+        opens_at: str = ""
+        confidential: bool = False
+        sealed_ref: str = ""
 
     @app.on_event("startup")
     async def startup():
@@ -70,6 +75,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "entry_type": req.entry_type,
             "description": req.description,
             "tags": req.tags,
+            "opens_at": req.opens_at,
+            "confidential": req.confidential,
+            "sealed_ref": req.sealed_ref,
         }
         entry = mint_entry(
             content=req.content, metadata=metadata,
@@ -101,6 +109,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "entry_type": entry_type,
             "description": description,
             "tags": [],
+            "opens_at": "",
+            "confidential": False,
+            "sealed_ref": "",
         }
         entry = mint_entry(
             content=content, metadata=metadata,
@@ -125,11 +136,52 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         e = get_entry(entry_id, data_dir)
         if not e:
             raise HTTPException(404, f"Entry {entry_id} not found")
-        return e
+        return _redact_timelocked(e)
+
+    @app.get("/chain/entry/{entry_id}/unlock")
+    async def unlock_entry(entry_id: str):
+        e = get_entry(entry_id, data_dir)
+        if not e:
+            raise HTTPException(404, f"Entry {entry_id} not found")
+        meta = e.get("metadata", {})
+        if isinstance(meta, str):
+            meta = json.loads(meta)
+        opens_at = meta.get("opens_at", "")
+        if not opens_at:
+            return e  # no timelock, return as-is
+        if _is_timelocked(meta):
+            raise HTTPException(403, f"Entry is timelocked until {opens_at}")
+        return e  # timelock expired, return full content
+
+    def _is_timelocked(meta: dict) -> bool:
+        """Check if an entry is currently timelocked."""
+        opens_at = meta.get("opens_at", "")
+        if not opens_at:
+            return False
+        try:
+            lock_dt = datetime.fromisoformat(opens_at)
+            if lock_dt.tzinfo is None:
+                lock_dt = lock_dt.replace(tzinfo=timezone.utc)
+            return datetime.now(timezone.utc) < lock_dt
+        except (ValueError, TypeError):
+            return False
+
+    def _redact_timelocked(entry: dict) -> dict:
+        """Replace content with placeholder if entry is timelocked."""
+        meta = entry.get("metadata", {})
+        if isinstance(meta, str):
+            meta = json.loads(meta)
+        if _is_timelocked(meta):
+            entry = dict(entry)
+            opens_at = meta.get("opens_at", "")
+            entry["content"] = f"[TIMELOCKED -- opens {opens_at}]"
+        return entry
 
     @app.get("/chain")
     async def chain(limit: int = 50, offset: int = 0):
-        return {"entries": get_chain(limit, offset, data_dir), "total": chain_length(data_dir)}
+        entries = get_chain(limit, offset, data_dir)
+        entries = [_redact_timelocked(e) for e in entries]
+        return {"entries": entries, "total": chain_length(data_dir)}
 
     @app.get("/chain/verify")
     async def verify():
@@ -240,6 +292,10 @@ def _mint_html(data_dir: Path | None = None) -> str:
       <option value="document">Document</option>
       <option value="photo">Photo Reference</option>
       <option value="letter">Letter</option>
+      <option value="feeling">Feeling</option>
+      <option value="morning_report">Morning Report</option>
+      <option value="battle_plan">Battle Plan</option>
+      <option value="seal">Seal</option>
     </select>
   </div>
   <div class="field">

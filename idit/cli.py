@@ -6,6 +6,9 @@ Usage:
     idit serve [--port PORT] Start the API server
     idit sign <file>         Sign a file to the chain
     idit mint <text>         Mint text directly to the chain
+    idit feel <text>         Mint a feeling entry
+    idit letter <text>       Mint a timelocked letter
+    idit seal <entry_id>     Seal an existing entry
     idit verify              Verify chain integrity
     idit status              Show chain stats
     idit signers             List all signers
@@ -157,6 +160,9 @@ def cmd_mint(args):
         print(f"Error: no key for signer '{args.signer}'. Run: idit init {args.signer}")
         sys.exit(1)
 
+    opens_at = getattr(args, "opens_at", "") or ""
+    confidential = getattr(args, "confidential", False)
+
     metadata = {
         "author_type": "human" if args.model in ("", "human") else "agent",
         "author_id": args.signer,
@@ -165,12 +171,140 @@ def cmd_mint(args):
         "entry_type": args.type,
         "description": args.description or "",
         "tags": [],
+        "opens_at": opens_at,
+        "confidential": confidential,
+        "sealed_ref": "",
     }
     entry = mint_entry(
         content=text, metadata=metadata,
         signing_key=sk, node_id="local", data_dir=data_dir,
     )
     print(f"MINTED  {entry['entry_id']}  {entry['entry_hash'][:24]}...  {args.signer}")
+    if opens_at:
+        print(f"  TIMELOCKED until {opens_at}")
+    if confidential:
+        print(f"  CONFIDENTIAL entry")
+
+
+def cmd_feel(args):
+    """Mint a feeling entry."""
+    data_dir = Path(args.data_dir)
+    init_chain_db(data_dir)
+
+    text = " ".join(args.text)
+    if not text:
+        print("Error: content required.")
+        sys.exit(1)
+
+    from .keys import load_signing_key
+    try:
+        sk = load_signing_key(args.signer, data_dir)
+    except FileNotFoundError:
+        print(f"Error: no key for signer '{args.signer}'. Run: idit init {args.signer}")
+        sys.exit(1)
+
+    metadata = {
+        "author_type": "human",
+        "author_id": args.signer,
+        "agent_model": "",
+        "node_id": "local",
+        "entry_type": "feeling",
+        "description": args.description or "",
+        "tags": [],
+        "opens_at": "",
+        "confidential": False,
+        "sealed_ref": "",
+    }
+    entry = mint_entry(
+        content=text, metadata=metadata,
+        signing_key=sk, node_id="local", data_dir=data_dir,
+    )
+    print(f"FELT  {entry['entry_id']}  {entry['entry_hash'][:24]}...  {args.signer}")
+
+
+def cmd_letter(args):
+    """Mint a timelocked letter."""
+    data_dir = Path(args.data_dir)
+    init_chain_db(data_dir)
+
+    text = " ".join(args.text)
+    if not text:
+        print("Error: content required.")
+        sys.exit(1)
+
+    from .keys import load_signing_key
+    try:
+        sk = load_signing_key(args.signer, data_dir)
+    except FileNotFoundError:
+        print(f"Error: no key for signer '{args.signer}'. Run: idit init {args.signer}")
+        sys.exit(1)
+
+    opens_at = getattr(args, "opens_at", "") or ""
+
+    metadata = {
+        "author_type": "human",
+        "author_id": args.signer,
+        "agent_model": "",
+        "node_id": "local",
+        "entry_type": "letter",
+        "description": args.description or "",
+        "tags": [],
+        "opens_at": opens_at,
+        "confidential": bool(opens_at),
+        "sealed_ref": "",
+    }
+    entry = mint_entry(
+        content=text, metadata=metadata,
+        signing_key=sk, node_id="local", data_dir=data_dir,
+    )
+    print(f"LETTER  {entry['entry_id']}  {entry['entry_hash'][:24]}...  {args.signer}")
+    if opens_at:
+        print(f"  TIMELOCKED until {opens_at}")
+
+
+def cmd_seal(args):
+    """Seal an existing entry by minting a seal reference."""
+    data_dir = Path(args.data_dir)
+    init_chain_db(data_dir)
+
+    from .keys import load_signing_key
+    try:
+        sk = load_signing_key(args.signer, data_dir)
+    except FileNotFoundError:
+        print(f"Error: no key for signer '{args.signer}'. Run: idit init {args.signer}")
+        sys.exit(1)
+
+    # Verify the referenced entry exists
+    from .chain import get_entry
+    ref = get_entry(args.entry_id, data_dir)
+    if not ref:
+        print(f"Error: entry '{args.entry_id}' not found in chain.")
+        sys.exit(1)
+
+    opens_at = getattr(args, "opens_at", "") or ""
+    content = f"SEAL: Entry {args.entry_id} sealed by {args.signer}."
+    if opens_at:
+        content += f" Opens at {opens_at}."
+
+    metadata = {
+        "author_type": "human",
+        "author_id": args.signer,
+        "agent_model": "",
+        "node_id": "local",
+        "entry_type": "seal",
+        "description": f"Seal of {args.entry_id}",
+        "tags": [],
+        "opens_at": opens_at,
+        "confidential": True,
+        "sealed_ref": args.entry_id,
+    }
+    entry = mint_entry(
+        content=content, metadata=metadata,
+        signing_key=sk, node_id="local", data_dir=data_dir,
+    )
+    print(f"SEALED  {args.entry_id}  ->  {entry['entry_id']}  {args.signer}")
+    if opens_at:
+        print(f"  TIMELOCKED until {opens_at}")
 
 
 def cmd_verify(args):
@@ -284,6 +418,27 @@ def main():
     p.add_argument("--model", default="", help="Model name (if AI)")
     p.add_argument("--type", default="note", help="Entry type")
     p.add_argument("--description", default="", help="Description")
+    p.add_argument("--opens-at", default="", help="ISO date for timelock (e.g., 2036-01-01)")
+    p.add_argument("--confidential", action="store_true", help="Mark as confidential")
+
+    # feel
+    p = sub.add_parser("feel", help="Mint a feeling entry")
+    p.add_argument("text", nargs="+", help="What you're feeling")
+    p.add_argument("--signer", required=True, help="Signer name")
+    p.add_argument("--description", default="", help="Description")
+
+    # letter
+    p = sub.add_parser("letter", help="Mint a timelocked letter")
+    p.add_argument("text", nargs="+", help="Letter content")
+    p.add_argument("--signer", required=True, help="Signer name")
+    p.add_argument("--opens-at", default="", help="ISO date when letter can be read (e.g., 2036-01-01)")
+    p.add_argument("--description", default="", help="Description")
+
+    # seal
+    p = sub.add_parser("seal", help="Seal an existing entry with a timelock")
+    p.add_argument("entry_id", help="Entry ID to seal")
+    p.add_argument("--signer", required=True, help="Signer name")
+    p.add_argument("--opens-at", default="", help="ISO date when seal opens (e.g., 2101-01-01)")
 
     # verify
     sub.add_parser("verify", help="Verify chain integrity")
@@ -311,7 +466,8 @@ def main():
 
     commands = {
         "init": cmd_init, "serve": cmd_serve, "sign": cmd_sign,
-        "mint": cmd_mint, "verify": cmd_verify, "status": cmd_status,
+        "mint": cmd_mint, "feel": cmd_feel, "letter": cmd_letter,
+        "seal": cmd_seal, "verify": cmd_verify, "status": cmd_status,
         "signers": cmd_signers, "export": cmd_export,
     }
     commands[args.command](args)
