@@ -2,15 +2,20 @@
 Personal Idit — Chain API Server
 Allows any signer to mint, query, and verify chain entries over HTTP.
 """
+import hmac
 import json
 import logging
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from .chain import (
     init_chain_db, mint_entry, get_head, get_entry,
@@ -24,8 +29,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("idit")
 
+SIGNER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$")
+READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
+    api_key = os.environ.get("IDIT_API_KEY", "")
+
     app = FastAPI(
         title="Personal Idit",
         version="0.1.0",
@@ -33,10 +43,31 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=[os.environ.get("IDIT_CORS_ORIGIN", "http://localhost:8000")],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-API-Key", "Authorization"],
     )
+
+    class ApiKeyMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if not api_key:
+                return await call_next(request)
+            path = request.url.path
+            if path == "/health":
+                return await call_next(request)
+            if request.method in READ_METHODS:
+                return await call_next(request)
+            key = request.headers.get("x-api-key") or request.headers.get(
+                "authorization", ""
+            ).removeprefix("Bearer ").strip()
+            if not key or not hmac.compare_digest(key, api_key):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid or missing API key"},
+                )
+            return await call_next(request)
+
+    app.add_middleware(ApiKeyMiddleware)
 
     class MintRequest(BaseModel):
         content: str
@@ -62,6 +93,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/mint")
     async def mint(req: MintRequest):
+        if not SIGNER_NAME_RE.match(req.signer):
+            raise HTTPException(400, "Invalid signer name. Use alphanumeric, dots, hyphens, underscores (1-63 chars).")
         try:
             sk = load_signing_key(req.signer, data_dir)
         except FileNotFoundError:
@@ -90,41 +123,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             f"{req.signer} | {entry['created_at']}"
         )
         return {**entry, "signature_block": sig_block}
-
-    @app.get("/mint/sign")
-    async def mint_via_get(
-        signer: str, content: str, model: str = "", node: str = "local",
-        entry_type: str = "note", description: str = "",
-    ):
-        try:
-            sk = load_signing_key(signer, data_dir)
-        except FileNotFoundError:
-            raise HTTPException(404, f"No key found for signer '{signer}'")
-
-        metadata = {
-            "author_type": "human" if model in ("", "human") else "agent",
-            "author_id": signer,
-            "agent_model": model,
-            "node_id": node,
-            "entry_type": entry_type,
-            "description": description,
-            "tags": [],
-            "opens_at": "",
-            "confidential": False,
-            "sealed_ref": "",
-        }
-        entry = mint_entry(
-            content=content, metadata=metadata,
-            signing_key=sk, node_id=node, data_dir=data_dir,
-        )
-        logger.info(f"MINT (GET): {signer} -> {entry['entry_id']} ({entry_type})")
-        return {
-            "status": "minted",
-            "entry_id": entry["entry_id"],
-            "entry_hash": entry["entry_hash"],
-            "signed_by": signer,
-            "timestamp": entry["created_at"],
-        }
 
     @app.get("/chain/head")
     async def head():
@@ -204,7 +202,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {
             "status": "ok",
             "chain_length": length,
-            "genesis": h["entry_id"] if h and length > 0 else None,
+            "head": h["entry_id"] if h else None,
         }
 
     return app

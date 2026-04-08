@@ -8,8 +8,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from nacl.signing import SigningKey
+from nacl.signing import SigningKey, VerifyKey
 from nacl.encoding import HexEncoder
+from nacl.exceptions import BadSignatureError
 
 DEFAULT_DATA_DIR = Path.home() / ".idit"
 
@@ -41,6 +42,15 @@ def sign_entry(entry: dict, signing_key: SigningKey) -> str:
     return signed.signature.decode()
 
 
+def verify_signature(entry_hash: str, signature: str, verify_key: VerifyKey) -> bool:
+    """Verify an Ed25519 signature against an entry hash. Returns True if valid."""
+    try:
+        verify_key.verify(entry_hash.encode("utf-8"), bytes.fromhex(signature))
+        return True
+    except (BadSignatureError, ValueError):
+        return False
+
+
 def db_path(data_dir: Path | None = None) -> Path:
     return (data_dir or DEFAULT_DATA_DIR) / "chain.db"
 
@@ -48,10 +58,11 @@ def db_path(data_dir: Path | None = None) -> Path:
 def get_db(data_dir: Path | None = None) -> sqlite3.Connection:
     p = db_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
+    conn = sqlite3.connect(str(p), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -124,24 +135,30 @@ def mint_entry(
     node_id: str = "local",
     data_dir: Path | None = None,
 ) -> dict:
-    """Create, sign, and store a new chain entry."""
-    head = get_head(data_dir)
-    prev_hash = head["entry_hash"] if head else "0" * 64
+    """Create, sign, and store a new chain entry.
 
-    content_hash = compute_hash(content)
-    entry = {
-        "prev_hash": prev_hash,
-        "content_hash": content_hash,
-        "metadata": metadata,
-        "created_at": now_iso(),
-    }
-
-    entry_hash = compute_entry_hash(entry)
-    signature = sign_entry(entry, signing_key)
-    entry_id = f"id-{entry_hash[:16]}"
-
+    Uses a single connection with IMMEDIATE transaction to prevent
+    race conditions between reading the head and inserting.
+    """
     conn = get_db(data_dir)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        row = conn.execute("SELECT * FROM chain ORDER BY seq DESC LIMIT 1").fetchone()
+        prev_hash = dict(row)["entry_hash"] if row else "0" * 64
+
+        content_hash = compute_hash(content)
+        entry = {
+            "prev_hash": prev_hash,
+            "content_hash": content_hash,
+            "metadata": metadata,
+            "created_at": now_iso(),
+        }
+
+        entry_hash = compute_entry_hash(entry)
+        signature = sign_entry(entry, signing_key)
+        entry_id = f"id-{entry_hash[:16]}"
+
         conn.execute("""
             INSERT INTO chain (entry_id, prev_hash, content, content_hash,
                              metadata, created_at, sig_algo, signature,
@@ -165,12 +182,22 @@ def mint_entry(
             "confirmations": [node_id],
             "entry_hash": entry_hash,
         }
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
-def verify_chain(data_dir: Path | None = None) -> dict:
-    """Walk the entire chain and verify all hashes and links."""
+def verify_chain(data_dir: Path | None = None, verify_keys: dict[str, VerifyKey] | None = None) -> dict:
+    """Walk the entire chain and verify all hashes, links, and signatures.
+
+    Args:
+        data_dir: Chain data directory.
+        verify_keys: Dict mapping author_id to VerifyKey for signature verification.
+            If None, signatures are checked structurally (non-empty, valid hex) but
+            not cryptographically verified. Pass keys to get full verification.
+    """
     conn = get_db(data_dir)
     try:
         rows = conn.execute("SELECT * FROM chain ORDER BY seq ASC").fetchall()
@@ -182,30 +209,56 @@ def verify_chain(data_dir: Path | None = None) -> dict:
 
         for row in rows:
             row = dict(row)
+
+            # 1. Verify hash chain linkage
             if row["prev_hash"] != prev_hash:
                 errors.append({
                     "entry_id": row["entry_id"],
                     "error": f"prev_hash mismatch: expected {prev_hash[:16]}..., got {row['prev_hash'][:16]}..."
                 })
 
+            # 2. Verify entry hash
+            metadata = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
             entry = {
                 "prev_hash": row["prev_hash"],
                 "content_hash": row["content_hash"],
-                "metadata": json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"],
+                "metadata": metadata,
                 "created_at": row["created_at"],
             }
             recomputed = compute_entry_hash(entry)
             if recomputed != row["entry_hash"]:
                 errors.append({
                     "entry_id": row["entry_id"],
-                    "error": f"entry_hash mismatch"
+                    "error": "entry_hash mismatch"
                 })
 
-            if row["content"] and compute_hash(row["content"]) != row["content_hash"]:
+            # 3. Verify content hash (always, even if content is NULL)
+            if row["content"] is not None:
+                if compute_hash(row["content"]) != row["content_hash"]:
+                    errors.append({
+                        "entry_id": row["entry_id"],
+                        "error": "content_hash does not match content"
+                    })
+
+            # 4. Verify signature
+            if not row["signature"]:
                 errors.append({
                     "entry_id": row["entry_id"],
-                    "error": "content_hash does not match content"
+                    "error": "missing signature"
                 })
+            elif verify_keys is not None:
+                author_id = metadata.get("author_id")
+                if author_id and author_id in verify_keys:
+                    if not verify_signature(row["entry_hash"], row["signature"], verify_keys[author_id]):
+                        errors.append({
+                            "entry_id": row["entry_id"],
+                            "error": f"invalid signature for author {author_id}"
+                        })
+                elif author_id:
+                    errors.append({
+                        "entry_id": row["entry_id"],
+                        "error": f"no verify key provided for author {author_id}"
+                    })
 
             prev_hash = row["entry_hash"]
 

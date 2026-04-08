@@ -2,21 +2,20 @@
 
 **Your life, hash-linked and signed.**
 
-A personal blockchain you run on your own hardware. Every entry is cryptographically signed with Ed25519 and hash-linked to the one before it. Nobody — not a government, not a corporation, not a future AI — can alter the record after the fact.
+A personal chain you run on your own machine. Entries are signed with Ed25519 and hash-linked. If someone changes a record, the chain breaks and verification fails.
 
-No tokens. No gas fees. No wallets. No cloud dependency. Just math on your machine.
+No tokens. No gas fees. No wallets. No cloud dependency. SQLite + Ed25519 + SHA-256.
 
-## Why
+## What It Does
 
-You already document your life — notes, photos, decisions, conversations with AI. But none of it is tamper-proof. None of it can prove *when* it was written or *who* wrote it. If someone changes a record, how would you know?
-
-Personal Idit gives you a chain of custody for your own life. Every entry gets:
+Every entry gets:
 - A **SHA-256 hash** linking it to the previous entry (tamper detection)
 - An **Ed25519 signature** proving who wrote it (authorship)
 - A **timestamp** (provenance)
-- **Content** that can never be silently altered after signing
 
-This is sovereign immutability. It's a diary that can prove it wasn't edited.
+Change any entry and `idit verify` catches it. Signatures are verified against the signer's public key. The chain is append-only — no edits, no deletes.
+
+**Status: early. v0.1.0.** Core chain operations work and are tested (75 tests). The project is young.
 
 ## Quick Start
 
@@ -55,21 +54,17 @@ That's it. Your chain lives at `~/.idit/`. Your private key is at `~/.idit/keys/
 
 If you run local AI (Ollama, llama.cpp, etc.), your agents can sign to the chain too. Each agent gets its own keypair. This means:
 
-- **Anti-hallucination**: The AI can check its own memory against the chain. If a memory is on-chain with a valid signature and hash link, it's real — not confabulated.
-- **Provenance**: Every AI output is signed with the model name and version. Years from now, you can prove *which model* said *what* and *when*.
-- **Accountability**: If the AI gives advice, the advice is on the chain. If the advice was bad, the record proves what was said.
+- **Provenance**: AI output is signed with model name and version. You can check later which model said what.
+- **Accountability**: Advice is on the chain with a signature. If the advice was wrong, the record shows what was said.
 
 ```bash
 # Create a key for your AI agent
 idit init my-assistant
 
-# The agent signs via the API
+# The agent signs via the API (POST only — no GET minting)
 curl -X POST http://localhost:18793/mint \
   -H 'Content-Type: application/json' \
   -d '{"content": "Recommended switching to solar panels based on 5-year ROI analysis.", "signer": "my-assistant", "model": "llama3.2:8b", "entry_type": "decision"}'
-
-# Or via GET (for agents that can only do GET requests)
-# http://localhost:18793/mint/sign?signer=my-assistant&content=My+note&model=llama3.2:8b&entry_type=note
 ```
 
 ## The Three-Layer Model
@@ -120,16 +115,6 @@ Each chain entry:
 
 The `entry_hash` is computed from `prev_hash + content_hash + metadata + created_at`. This is what gets signed. Changing any field breaks the hash. Changing any hash breaks the chain.
 
-## Multi-Machine (Optional)
-
-If you have multiple machines on a private network (e.g., Tailscale), you can run Idit on each one and sync chains between them. This gives you:
-
-- **Redundancy**: Chain survives if one machine dies
-- **Multi-node confirmation**: Entries confirmed by multiple machines
-- **Distributed signing**: Different agents on different machines, all writing to the same chain
-
-The sync protocol is gossip-based HTTP — machines poll each other's `/chain` endpoints. No central coordinator.
-
 ## Quantum Resilience
 
 - **SHA-256 hash chains**: Quantum-safe. Grover's algorithm reduces security to 2^128 — still unbreakable.
@@ -138,18 +123,20 @@ The sync protocol is gossip-based HTTP — machines poll each other's `/chain` e
 
 ## API Reference
 
-Start the server with `idit serve` (default port 18793).
+Start the server with `idit serve` (default port 18793, binds to localhost only).
+
+Set `IDIT_API_KEY` to require authentication on write operations. Pass via `X-API-Key` header or `Authorization: Bearer` header.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Web mint UI |
-| `/mint` | POST | Mint a new entry (JSON body) |
-| `/mint/sign` | GET | Mint via query params (for agents) |
+| `/mint` | POST | Mint a new entry (JSON body, requires API key if set) |
 | `/chain` | GET | List entries (limit, offset) |
 | `/chain/head` | GET | Latest entry |
-| `/chain/entry/{id}` | GET | Specific entry |
+| `/chain/entry/{id}` | GET | Specific entry (timelocked content redacted) |
+| `/chain/entry/{id}/unlock` | GET | Full entry (403 if still timelocked) |
 | `/chain/stats` | GET | Chain statistics |
-| `/chain/verify` | GET | Verify all hashes and links |
+| `/chain/verify` | GET | Verify hashes and links |
 | `/signers` | GET | List all signers with public keys |
 | `/health` | GET | Health check |
 
@@ -161,11 +148,7 @@ Adoption is voluntary. Your chain has full value without ever connecting to idit
 
 ## Philosophy
 
-This is an autobiography machine. You are the author. Your AI agents are the ghost writers. The chain is the binding.
-
-Nobody needs permission to start documenting their life. You don't need a blockchain company. You don't need tokens. You don't need to understand cryptography. You need a computer and something worth remembering.
-
-The math does the rest.
+A personal chain for documenting your life. You write to it, your AI agents write to it, and the math keeps everyone honest. No blockchain company required.
 
 ## Install from Source
 

@@ -308,12 +308,24 @@ def cmd_seal(args):
 
 
 def cmd_verify(args):
-    """Verify chain integrity."""
+    """Verify chain integrity including cryptographic signatures."""
     data_dir = Path(args.data_dir)
     init_chain_db(data_dir)
-    result = verify_chain(data_dir)
+
+    # Load all available verify keys for signature checking
+    from .keys import load_verify_key
+    signers = list_signers(data_dir)
+    verify_keys = {}
+    for s in signers:
+        try:
+            verify_keys[s["name"]] = load_verify_key(s["name"], data_dir)
+        except FileNotFoundError:
+            pass
+
+    result = verify_chain(data_dir, verify_keys=verify_keys if verify_keys else None)
     if result["valid"]:
-        print(f"CHAIN VALID  |  {result['length']} entries  |  head: {result.get('head', 'N/A')[:24] if result.get('head') else 'empty'}...")
+        sig_note = f" (signatures verified for {len(verify_keys)} signers)" if verify_keys else " (hash-only, no keys loaded)"
+        print(f"CHAIN VALID  |  {result['length']} entries  |  head: {result.get('head', 'N/A')[:24] if result.get('head') else 'empty'}...{sig_note}")
     else:
         print(f"CHAIN BROKEN  |  {result['length']} entries  |  {len(result['errors'])} errors:")
         for err in result["errors"]:
@@ -401,7 +413,7 @@ def main():
     # serve
     p = sub.add_parser("serve", help="Start the API server")
     p.add_argument("--port", type=int, default=18793, help="Port (default: 18793)")
-    p.add_argument("--host", default="0.0.0.0", help="Host (default: 0.0.0.0)")
+    p.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1, use 0.0.0.0 for network access)")
 
     # sign
     p = sub.add_parser("sign", help="Sign a file to the chain")
