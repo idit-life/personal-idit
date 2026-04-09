@@ -15,7 +15,12 @@ Every entry gets:
 
 Change any entry and `idit verify` catches it. Signatures are verified against the signer's public key. The chain is append-only — no edits, no deletes.
 
-**Status: early. v0.1.0.** Core chain operations work and are tested (75 tests). The project is young.
+**Status: early alpha. v0.1.0.** This is a bootstrapped proof of concept, tested internally on sandboxed development machines. If you use this software:
+
+- **Inspect the code yourself.** Do not trust any open-source project — including this one — without reviewing it.
+- **Run in a VM or isolated environment.** We recommend Tailscale for network isolation if running the API server.
+- **Back up your data** before adding features or upgrading versions.
+- **This is not production-hardened.** The core chain operations work and are tested (75 tests covering crypto, auth, tamper detection, and edge cases), but this has not been independently audited. Use at your own risk.
 
 ## Quick Start
 

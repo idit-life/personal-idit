@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
@@ -70,16 +70,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     app.add_middleware(ApiKeyMiddleware)
 
     class MintRequest(BaseModel):
-        content: str
-        signer: str
-        model: str = ""
-        node: str = "local"
-        entry_type: str = "note"
-        description: str = ""
-        tags: list[str] = []
-        opens_at: str = ""
+        content: str = Field(max_length=1_000_000)  # 1MB max content
+        signer: str = Field(max_length=63)
+        model: str = Field(default="", max_length=200)
+        node: str = Field(default="local", max_length=200)
+        entry_type: str = Field(default="note", max_length=100)
+        description: str = Field(default="", max_length=2000)
+        tags: list[str] = Field(default=[], max_length=50)
+        opens_at: str = Field(default="", max_length=100)
         confidential: bool = False
-        sealed_ref: str = ""
+        sealed_ref: str = Field(default="", max_length=100)
 
     @app.on_event("startup")
     async def startup():
@@ -183,7 +183,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/chain/verify")
     async def verify():
-        return verify_chain(data_dir)
+        from .keys import load_verify_key
+        signers = list_signers(data_dir)
+        verify_keys = {}
+        for s in signers:
+            try:
+                verify_keys[s["name"]] = load_verify_key(s["name"], data_dir)
+            except FileNotFoundError:
+                pass
+        return verify_chain(data_dir, verify_keys=verify_keys if verify_keys else None)
 
     @app.get("/chain/stats")
     async def stats():
@@ -342,16 +350,17 @@ async function doMint() {
   }
   btn.disabled = false; btn.textContent = '// MINT';
 }
+function esc(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 async function loadChain() {
   try {
     const [statsR, chainR] = await Promise.all([fetch('/chain/stats'), fetch('/chain?limit=5')]);
     const stats = await statsR.json(); const chain = await chainR.json();
     document.getElementById('chainStats').innerHTML =
-      '<div class="stat"><div class="val">' + (stats.length||0) + '</div><div class="lbl">BLOCKS</div></div>' +
+      '<div class="stat"><div class="val">' + parseInt(stats.length||0) + '</div><div class="lbl">BLOCKS</div></div>' +
       '<div class="stat"><div class="val">' + Object.keys(stats.authors||{}).length + '</div><div class="lbl">SIGNERS</div></div>';
     document.getElementById('recentEntries').innerHTML = (chain.entries||[]).map(function(e) {
       var meta = typeof e.metadata === 'string' ? JSON.parse(e.metadata) : e.metadata;
-      return '<div class="entry-row"><span class="entry-id">' + e.entry_id + '</span><span class="entry-type">' + (meta.entry_type||'?') + '</span><span class="entry-author">' + (meta.author_id||'?') + '</span><span class="entry-time">' + (e.created_at||'').substring(0,19) + '</span></div>';
+      return '<div class="entry-row"><span class="entry-id">' + esc(e.entry_id||'') + '</span><span class="entry-type">' + esc(meta.entry_type||'?') + '</span><span class="entry-author">' + esc(meta.author_id||'?') + '</span><span class="entry-time">' + esc((e.created_at||'').substring(0,19)) + '</span></div>';
     }).join('');
   } catch(e) { console.error(e); }
 }
